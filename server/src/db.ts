@@ -18,6 +18,9 @@ db.exec(`
     meeting_date TEXT NOT NULL,
     duration_seconds INTEGER,
     audio_path TEXT,
+    audio_mime_type TEXT,
+    original_filename TEXT,
+    audio_hash TEXT UNIQUE,
     status TEXT NOT NULL DEFAULT 'recorded',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
@@ -51,6 +54,15 @@ db.exec(`
   );
 `);
 
+for (const column of [
+  ['audio_mime_type', 'TEXT'],
+  ['original_filename', 'TEXT'],
+  ['audio_hash', 'TEXT'],
+] as const) {
+  const exists = db.prepare('SELECT 1 FROM pragma_table_info(\'meetings\') WHERE name = ?').get(column[0]);
+  if (!exists) db.exec(`ALTER TABLE meetings ADD COLUMN ${column[0]} ${column[1]}`);
+}
+
 const mapMeeting = (row: Record<string, unknown>): Meeting => ({
   id: Number(row.id),
   title: String(row.title),
@@ -58,6 +70,8 @@ const mapMeeting = (row: Record<string, unknown>): Meeting => ({
   meetingDate: String(row.meeting_date),
   duration: row.duration_seconds === null ? null : Number(row.duration_seconds),
   audioPath: row.audio_path === null ? null : String(row.audio_path),
+  audioMimeType: row.audio_mime_type === null ? null : String(row.audio_mime_type),
+  originalFilename: row.original_filename === null ? null : String(row.original_filename),
   status: String(row.status) as MeetingStatus,
   createdAt: String(row.created_at),
 });
@@ -80,7 +94,45 @@ export const createMeeting = (input: Pick<Meeting, 'title' | 'managerName' | 'me
   return findMeeting(Number(result.lastInsertRowid)) as Meeting;
 };
 
-export const deleteMeeting = (id: number): boolean => db.prepare('DELETE FROM meetings WHERE id = ?').run(id).changes > 0;
+export const attachAudio = (input: {
+  meetingId: number;
+  audioPath: string;
+  audioMimeType: string;
+  originalFilename: string;
+  audioHash: string;
+  duration: number | null;
+  consentType: string;
+  consentVersion: string;
+  confirmedAt: string;
+}): Meeting | null => {
+  const transaction = db.transaction(() => {
+    const meeting = findMeeting(input.meetingId);
+    if (!meeting) return null;
+    db.prepare(`
+      UPDATE meetings
+      SET audio_path = @audioPath,
+          audio_mime_type = @audioMimeType,
+          original_filename = @originalFilename,
+          audio_hash = @audioHash,
+          duration_seconds = @duration,
+          status = 'recorded'
+      WHERE id = @meetingId
+    `).run(input);
+    db.prepare(`
+      INSERT INTO consents (meeting_id, consent_type, consent_version, confirmed_at)
+      VALUES (@meetingId, @consentType, @consentVersion, @confirmedAt)
+    `).run(input);
+    return findMeeting(input.meetingId);
+  });
+  return transaction() as Meeting | null;
+};
+
+export const deleteMeeting = (id: number): { deleted: boolean; audioPath: string | null } => {
+  const meeting = findMeeting(id);
+  if (!meeting) return { deleted: false, audioPath: null };
+  db.prepare('DELETE FROM meetings WHERE id = ?').run(id);
+  return { deleted: true, audioPath: meeting.audioPath };
+};
 
 export const getDashboardStats = (): DashboardStats => {
   const row = db.prepare(`

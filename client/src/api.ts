@@ -5,6 +5,8 @@ export interface Meeting {
   meetingDate: string;
   duration: number | null;
   audioPath: string | null;
+  audioMimeType: string | null;
+  originalFilename: string | null;
   status: 'recorded' | 'transcribing' | 'analyzing' | 'analyzed' | 'error';
   createdAt: string;
 }
@@ -16,7 +18,9 @@ export interface DashboardStats {
 }
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(url, { credentials: 'include', ...options, headers: { 'Content-Type': 'application/json', ...(options?.headers ?? {}) } });
+  const headers = new Headers(options?.headers);
+  if (!(options?.body instanceof FormData)) headers.set('Content-Type', 'application/json');
+  const response = await fetch(url, { credentials: 'include', ...options, headers });
   if (!response.ok) {
     const body = await response.json().catch(() => ({ error: 'Неизвестная ошибка' }));
     throw new Error(body.error ?? 'Ошибка запроса');
@@ -31,5 +35,16 @@ export const api = {
   logout: () => request<void>('/api/auth/logout', { method: 'POST' }),
   stats: () => request<DashboardStats>('/api/dashboard/stats'),
   meetings: () => request<Meeting[]>('/api/meetings'),
+  meeting: (id: number) => request<Meeting>(`/api/meetings/${id}`),
+  createMeeting: (input: { title: string; managerName: string; meetingDate: string }) => request<Meeting>('/api/meetings', { method: 'POST', body: JSON.stringify(input) }),
+  uploadAudio: (id: number, file: Blob, filename: string, duration: number | null, consentType: 'recording' | 'audio_upload', confirmedAt: string) => {
+    const form = new FormData();
+    form.append('audio', file, filename);
+    if (duration !== null) form.append('duration', String(duration));
+    form.append('consentType', consentType);
+    form.append('confirmedAt', confirmedAt);
+    return request<Meeting>(`/api/meetings/${id}/audio`, { method: 'POST', body: form });
+  },
+  audioUrl: (id: number) => `/api/meetings/${id}/audio`,
   deleteMeeting: (id: number) => request<void>(`/api/meetings/${id}`, { method: 'DELETE' }),
 };

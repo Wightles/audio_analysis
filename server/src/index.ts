@@ -1,9 +1,12 @@
 import 'dotenv/config';
 import express from 'express';
 import cookieParser from 'cookie-parser';
+import multer from 'multer';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
-import { createMeeting, deleteMeeting, findMeeting, getDashboardStats, listMeetings } from './db.js';
+import { attachAudio, createMeeting, db, deleteMeeting, findMeeting, getDashboardStats, listMeetings } from './db.js';
 import { isAuthenticated, login, logout, requireAuth } from './auth.js';
 
 const app = express();
@@ -11,6 +14,33 @@ const port = Number(process.env.PORT ?? 4000);
 const clientOrigin = process.env.CLIENT_ORIGIN ?? 'http://localhost:5173';
 const demoPassword = process.env.DEMO_PASSWORD ?? 'royal-brick-demo';
 process.env.DEMO_PASSWORD = demoPassword;
+const storageDirectory = path.resolve(process.env.STORAGE_DIR ?? 'server/storage');
+const temporaryAudioDirectory = path.join(storageDirectory, '.tmp');
+const finalAudioDirectory = path.join(storageDirectory, 'audio');
+fs.mkdirSync(temporaryAudioDirectory, { recursive: true });
+fs.mkdirSync(finalAudioDirectory, { recursive: true });
+const maxAudioSize = Number(process.env.MAX_AUDIO_SIZE_MB ?? 250) * 1024 * 1024;
+const allowedExtensions = new Set(['.mp3', '.wav', '.webm', '.m4a']);
+const allowedMimeTypes = new Set(['audio/mpeg', 'audio/wav', 'audio/x-wav', 'audio/wave', 'audio/webm', 'audio/mp4', 'audio/x-m4a', 'video/mp4', 'application/octet-stream']);
+const consentVersion = '1.0';
+
+const audioUpload = multer({
+  storage: multer.diskStorage({
+    destination: temporaryAudioDirectory,
+    filename: (_request, file, callback) => callback(null, `${Date.now()}-${crypto.randomUUID()}${path.extname(file.originalname).toLowerCase()}`),
+  }),
+  limits: { fileSize: maxAudioSize },
+  fileFilter: (_request, file, callback) => {
+    const extension = path.extname(file.originalname).toLowerCase();
+    callback(null, allowedExtensions.has(extension) && allowedMimeTypes.has(file.mimetype));
+  },
+});
+
+const resolveAudioPath = (relativePath: string): string => {
+  const resolved = path.resolve(storageDirectory, relativePath);
+  if (!resolved.startsWith(`${storageDirectory}${path.sep}`)) throw new Error('Некорректный путь к аудиофайлу');
+  return resolved;
+};
 
 app.disable('x-powered-by');
 app.use(express.json({ limit: '1mb' }));
@@ -63,11 +93,91 @@ app.post('/api/meetings', (request, response) => {
   }
   response.status(201).json(createMeeting(parsed.data));
 });
-app.delete('/api/meetings/:id', (request, response) => {
-  if (!deleteMeeting(Number(request.params.id))) {
+app.post('/api/meetings/:id/audio', audioUpload.single('audio'), (request, response) => {
+  const meetingId = Number(request.params.id);
+  const meeting = findMeeting(meetingId);
+  if (!meeting) {
+    if (request.file) fs.rmSync(request.file.path, { force: true });
     response.status(404).json({ error: 'Встреча не найдена' });
     return;
   }
+  if (!request.file) {
+    response.status(400).json({ error: 'Выберите аудиофайл в формате MP3, WAV, WebM или M4A' });
+    return;
+  }
+
+  const parsed = z.object({
+    duration: z.coerce.number().int().min(0).nullable().optional(),
+    consentType: z.enum(['recording', 'audio_upload']),
+    confirmedAt: z.string().datetime({ offset: true }),
+  }).safeParse(request.body);
+  if (!parsed.success) {
+    fs.rmSync(request.file.path, { force: true });
+    response.status(400).json({ error: 'Не подтверждено согласие на сохранение аудиозаписи' });
+    return;
+  }
+
+  const originalFilename = path.basename(request.file.originalname);
+  const extension = path.extname(originalFilename).toLowerCase();
+  const audioHash = crypto.createHash('sha256').update(fs.readFileSync(request.file.path)).digest('hex');
+  const duplicate = (db.prepare('SELECT id FROM meetings WHERE audio_hash = ?').get(audioHash) as { id: number } | undefined);
+  if (duplicate) {
+    fs.rmSync(request.file.path, { force: true });
+    response.status(409).json({ error: `Этот файл уже импортирован во встречу №${duplicate.id}` });
+    return;
+  }
+
+  const relativeAudioPath = path.join('audio', `${crypto.randomUUID()}${extension}`);
+  const finalPath = resolveAudioPath(relativeAudioPath);
+  fs.renameSync(request.file.path, finalPath);
+  try {
+    const updated = attachAudio({
+      meetingId,
+      audioPath: relativeAudioPath,
+      audioMimeType: request.file.mimetype,
+      originalFilename,
+      audioHash,
+      duration: parsed.data.duration ?? null,
+      consentType: parsed.data.consentType,
+      consentVersion,
+      confirmedAt: parsed.data.confirmedAt,
+    });
+    if (!updated) {
+      fs.rmSync(finalPath, { force: true });
+      response.status(404).json({ error: 'Встреча не найдена' });
+      return;
+    }
+    response.status(201).json(updated);
+  } catch (error) {
+    fs.rmSync(finalPath, { force: true });
+    if (String(error).includes('UNIQUE constraint failed')) {
+      response.status(409).json({ error: 'Этот аудиофайл уже сохранён' });
+      return;
+    }
+    throw error;
+  }
+});
+app.get('/api/meetings/:id/audio', (request, response) => {
+  const meeting = findMeeting(Number(request.params.id));
+  if (!meeting?.audioPath) {
+    response.status(404).json({ error: 'Аудиозапись не найдена' });
+    return;
+  }
+  const audioPath = resolveAudioPath(meeting.audioPath);
+  if (!fs.existsSync(audioPath)) {
+    response.status(404).json({ error: 'Файл аудиозаписи отсутствует на диске' });
+    return;
+  }
+  response.type(meeting.audioMimeType ?? path.extname(audioPath));
+  response.sendFile(audioPath);
+});
+app.delete('/api/meetings/:id', (request, response) => {
+  const result = deleteMeeting(Number(request.params.id));
+  if (!result.deleted) {
+    response.status(404).json({ error: 'Встреча не найдена' });
+    return;
+  }
+  if (result.audioPath) fs.rmSync(resolveAudioPath(result.audioPath), { force: true });
   response.status(204).send();
 });
 
@@ -85,6 +195,14 @@ if (process.env.NODE_ENV === 'production') {
 
 app.use((error: unknown, _request: express.Request, response: express.Response, _next: express.NextFunction) => {
   console.error(error);
+  if (error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE') {
+    response.status(413).json({ error: `Файл превышает допустимый размер ${process.env.MAX_AUDIO_SIZE_MB ?? 250} МБ` });
+    return;
+  }
+  if (error instanceof multer.MulterError || String(error).includes('Unexpected field')) {
+    response.status(400).json({ error: 'Не удалось принять аудиофайл. Проверьте формат и размер.' });
+    return;
+  }
   response.status(500).json({ error: 'Внутренняя ошибка сервера' });
 });
 

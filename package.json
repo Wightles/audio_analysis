@@ -8,6 +8,7 @@
     "dev:server": "tsx server/src/index.ts",
     "dev:client": "vite --config client/vite.config.ts",
     "build": "tsc -p server/tsconfig.json && vite build --config client/vite.config.ts",
+    "import:audio": "node server/scripts/import-audio.mjs",
     "typecheck": "tsc -p server/tsconfig.json --noEmit && tsc -p client/tsconfig.json --noEmit",
     "start": "node server/dist/index.js"
   },
@@ -18,6 +19,7 @@
     "dotenv": "latest",
     "express": "latest",
     "lucide-react": "latest",
+    "multer": "latest",
     "react": "latest",
     "react-dom": "latest",
     "react-router-dom": "latest",
@@ -28,6 +30,7 @@
     "@types/cookie-parser": "latest",
     "@types/express": "latest",
     "@types/node": "latest",
+    "@types/multer": "latest",
     "@types/react": "latest",
     "@types/react-dom": "latest",
     "concurrently": "latest",

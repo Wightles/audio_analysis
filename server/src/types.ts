@@ -7,6 +7,8 @@ export interface Meeting {
   meetingDate: string;
   duration: number | null;
   audioPath: string | null;
+  audioMimeType: string | null;
+  originalFilename: string | null;
   status: MeetingStatus;
   createdAt: string;
 }

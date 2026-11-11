@@ -5,9 +5,12 @@ server/dist/
 .env
 .env.*
 !.env.example
-server/data/
-server/storage/
-server/import/
+server/data/*
+!server/data/.gitignore
+server/storage/*
+!server/storage/.gitignore
+server/import/*
+!server/import/.gitignore
 *.db
 *.db-shm
 *.db-wal
