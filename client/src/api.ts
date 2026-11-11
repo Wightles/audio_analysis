@@ -1,3 +1,5 @@
+import type { RoyalBrickReport } from './report';
+
 export interface Meeting {
   id: number;
   title: string;
@@ -32,6 +34,15 @@ export interface TranscriptRecord {
   updatedAt: string | null;
 }
 
+export interface AnalysisRecord {
+  id: number;
+  meetingId: number;
+  score: number | null;
+  coverage: number | null;
+  result: RoyalBrickReport;
+  createdAt: string;
+}
+
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const headers = new Headers(options?.headers);
   if (!(options?.body instanceof FormData)) headers.set('Content-Type', 'application/json');
@@ -54,6 +65,8 @@ export const api = {
   transcript: (id: number) => request<TranscriptRecord>(`/api/meetings/${id}/transcript`),
   saveTranscript: (id: number, content: string, segments: TranscriptSegment[] = []) => request<TranscriptRecord>(`/api/meetings/${id}/transcript`, { method: 'PUT', body: JSON.stringify({ content, segments }) }),
   transcribe: (id: number) => request<{ transcript: TranscriptRecord; provider: string; language: string | null }>(`/api/meetings/${id}/transcribe`, { method: 'POST', body: JSON.stringify({}) }),
+  analyze: (id: number) => request<AnalysisRecord>(`/api/meetings/${id}/analyze`, { method: 'POST', body: JSON.stringify({}) }),
+  analysis: (id: number) => request<AnalysisRecord>(`/api/meetings/${id}/analysis`),
   createMeeting: (input: { title: string; managerName: string; meetingDate: string }) => request<Meeting>('/api/meetings', { method: 'POST', body: JSON.stringify(input) }),
   uploadAudio: (id: number, file: Blob, filename: string, duration: number | null, consentType: 'recording' | 'audio_upload', confirmedAt: string) => {
     const form = new FormData();
