@@ -6,7 +6,7 @@ const sessions = new Set<string>();
 const attempts = new Map<string, { count: number; blockedUntil: number }>();
 
 export const isAuthenticated = (request: Request): boolean => {
-  const token = request.cookies?.[sessionCookie];
+  const token = request.signedCookies?.[sessionCookie];
   return typeof token === 'string' && sessions.has(token);
 };
 
@@ -45,13 +45,14 @@ export const login = (request: Request, response: Response, password: string): v
     httpOnly: true,
     sameSite: 'lax',
     secure: process.env.NODE_ENV === 'production',
+    signed: true,
     maxAge: 8 * 60 * 60 * 1000,
   });
   response.json({ authenticated: true });
 };
 
 export const logout = (request: Request, response: Response): void => {
-  const token = request.cookies?.[sessionCookie];
+  const token = request.signedCookies?.[sessionCookie];
   if (typeof token === 'string') sessions.delete(token);
   response.clearCookie(sessionCookie);
   response.status(204).send();

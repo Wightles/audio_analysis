@@ -18,6 +18,7 @@ const port = Number(process.env.PORT ?? 4000);
 const clientOrigin = process.env.CLIENT_ORIGIN ?? 'http://localhost:5173';
 const demoPassword = process.env.DEMO_PASSWORD ?? 'royal-brick-demo';
 process.env.DEMO_PASSWORD = demoPassword;
+const sessionSecret = process.env.SESSION_SECRET && process.env.SESSION_SECRET !== 'replace-with-a-long-random-value' ? process.env.SESSION_SECRET : crypto.randomBytes(32).toString('hex');
 const storageDirectory = path.resolve(process.env.STORAGE_DIR ?? 'server/storage');
 const temporaryAudioDirectory = path.join(storageDirectory, '.tmp');
 const finalAudioDirectory = path.join(storageDirectory, 'audio');
@@ -50,8 +51,16 @@ const resolveAudioPath = (relativePath: string): string => {
 };
 
 app.disable('x-powered-by');
+app.set('trust proxy', process.env.TRUST_PROXY === 'true');
 app.use(express.json({ limit: '1mb' }));
-app.use(cookieParser());
+app.use(cookieParser(sessionSecret));
+app.use((_request, response, next) => {
+  response.setHeader('X-Content-Type-Options', 'nosniff');
+  response.setHeader('X-Frame-Options', 'DENY');
+  response.setHeader('Referrer-Policy', 'no-referrer');
+  response.setHeader('Permissions-Policy', 'microphone=(self)');
+  next();
+});
 app.use((request, response, next) => {
   response.setHeader('Access-Control-Allow-Origin', clientOrigin);
   response.setHeader('Access-Control-Allow-Credentials', 'true');
@@ -315,4 +324,10 @@ app.use((error: unknown, _request: express.Request, response: express.Response, 
   response.status(500).json({ error: 'Внутренняя ошибка сервера' });
 });
 
-app.listen(port, () => console.log(`Royal Brick AI Auditor server listening on http://localhost:${port}`));
+const server = app.listen(port, () => console.log(`Royal Brick AI Auditor server listening on http://localhost:${port}`));
+const shutdown = (signal: string) => {
+  console.log(`Received ${signal}, shutting down`);
+  server.close(() => { db.close(); process.exit(0); });
+};
+process.once('SIGINT', () => shutdown('SIGINT'));
+process.once('SIGTERM', () => shutdown('SIGTERM'));

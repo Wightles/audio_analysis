@@ -1,0 +1,21 @@
+[Unit]
+Description=Royal Brick AI Auditor
+After=network.target
+
+[Service]
+Type=simple
+User=royalbrick
+Group=royalbrick
+WorkingDirectory=/opt/royal-brick-ai-auditor
+EnvironmentFile=/opt/royal-brick-ai-auditor/.env
+ExecStart=/usr/bin/node /opt/royal-brick-ai-auditor/server/dist/index.js
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/opt/royal-brick-ai-auditor/server/data /opt/royal-brick-ai-auditor/server/storage
+
+[Install]
+WantedBy=multi-user.target
