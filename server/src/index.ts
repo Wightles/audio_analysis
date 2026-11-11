@@ -6,8 +6,12 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
-import { attachAudio, createMeeting, db, deleteMeeting, findMeeting, getDashboardStats, listMeetings } from './db.js';
+import { attachAudio, createMeeting, db, deleteMeeting, findMeeting, getAnalysis, getDashboardStats, getTranscript, listMeetings, saveAnalysis, setMeetingStatus, upsertTranscript } from './db.js';
 import { isAuthenticated, login, logout, requireAuth } from './auth.js';
+import { AIProviderFactory } from './ai/factory.js';
+import { AIProviderUnavailableError } from './ai/provider.js';
+import { MeetingAnalysisService, TranscriptionService, type MeetingContext } from './ai/services.js';
+import { AnalysisValidationError, validateRoyalBrickReport } from './ai/validation.js';
 
 const app = express();
 const port = Number(process.env.PORT ?? 4000);
@@ -23,6 +27,9 @@ const maxAudioSize = Number(process.env.MAX_AUDIO_SIZE_MB ?? 250) * 1024 * 1024;
 const allowedExtensions = new Set(['.mp3', '.wav', '.webm', '.m4a']);
 const allowedMimeTypes = new Set(['audio/mpeg', 'audio/wav', 'audio/x-wav', 'audio/wave', 'audio/webm', 'audio/mp4', 'audio/x-m4a', 'video/mp4', 'application/octet-stream']);
 const consentVersion = '1.0';
+const aiProvider = AIProviderFactory.create();
+const transcriptionService = new TranscriptionService(aiProvider);
+const meetingAnalysisService = new MeetingAnalysisService(aiProvider);
 
 const audioUpload = multer({
   storage: multer.diskStorage({
@@ -180,6 +187,100 @@ app.delete('/api/meetings/:id', (request, response) => {
   if (result.audioPath) fs.rmSync(resolveAudioPath(result.audioPath), { force: true });
   response.status(204).send();
 });
+app.get('/api/meetings/:id/transcript', (request, response) => {
+  const meetingId = Number(request.params.id);
+  if (!findMeeting(meetingId)) {
+    response.status(404).json({ error: 'Встреча не найдена' });
+    return;
+  }
+  response.json(getTranscript(meetingId));
+});
+app.put('/api/meetings/:id/transcript', (request, response) => {
+  const meetingId = Number(request.params.id);
+  if (!findMeeting(meetingId)) {
+    response.status(404).json({ error: 'Встреча не найдена' });
+    return;
+  }
+  const parsed = z.object({
+    content: z.string().max(20_000_000),
+    segments: z.array(z.object({
+      startSeconds: z.number().finite().nullable(),
+      endSeconds: z.number().finite().nullable(),
+      speaker: z.string().max(120).nullable(),
+      text: z.string().max(20_000),
+    })).max(100_000).default([]),
+  }).safeParse(request.body);
+  if (!parsed.success) {
+    response.status(400).json({ error: 'Расшифровка имеет неверный формат' });
+    return;
+  }
+  response.json(upsertTranscript(meetingId, parsed.data.content, parsed.data.segments));
+});
+app.post('/api/meetings/:id/transcribe', async (request, response, next) => {
+  const meetingId = Number(request.params.id);
+  const meeting = findMeeting(meetingId);
+  if (!meeting) {
+    response.status(404).json({ error: 'Встреча не найдена' });
+    return;
+  }
+  if (!meeting.audioPath) {
+    response.status(400).json({ error: 'Для транскрибации сначала сохраните аудиозапись' });
+    return;
+  }
+  try {
+    setMeetingStatus(meetingId, 'transcribing');
+    const result = await transcriptionService.transcribe({
+      filePath: resolveAudioPath(meeting.audioPath),
+      mimeType: meeting.audioMimeType ?? 'application/octet-stream',
+      filename: meeting.originalFilename ?? path.basename(meeting.audioPath),
+      durationSeconds: meeting.duration,
+    });
+    const transcript = upsertTranscript(meetingId, result.content, result.segments);
+    setMeetingStatus(meetingId, 'recorded');
+    response.status(201).json({ transcript, provider: result.provider, language: result.language });
+  } catch (error) {
+    if (!(error instanceof AIProviderUnavailableError)) setMeetingStatus(meetingId, 'error');
+    next(error);
+  }
+});
+app.post('/api/meetings/:id/analyze', async (request, response, next) => {
+  const meetingId = Number(request.params.id);
+  const meeting = findMeeting(meetingId);
+  if (!meeting) {
+    response.status(404).json({ error: 'Встреча не найдена' });
+    return;
+  }
+  const transcript = getTranscript(meetingId);
+  if (!transcript.content.trim()) {
+    response.status(400).json({ error: 'Сначала добавьте или получите расшифровку встречи' });
+    return;
+  }
+  const context: MeetingContext = { meetingId, managerName: meeting.managerName, meetingDate: meeting.meetingDate };
+  try {
+    setMeetingStatus(meetingId, 'analyzing');
+    const report = await meetingAnalysisService.analyze({ content: transcript.content, segments: transcript.segments, language: null, provider: 'manual' }, context);
+    const scoreSummary = validateRoyalBrickReport(report);
+    const analysis = saveAnalysis(meetingId, scoreSummary.normalizedScore, scoreSummary.coverage, report);
+    setMeetingStatus(meetingId, 'analyzed');
+    response.status(201).json(analysis);
+  } catch (error) {
+    if (!(error instanceof AIProviderUnavailableError)) setMeetingStatus(meetingId, 'error');
+    next(error);
+  }
+});
+app.get('/api/meetings/:id/analysis', (request, response) => {
+  const meetingId = Number(request.params.id);
+  if (!findMeeting(meetingId)) {
+    response.status(404).json({ error: 'Встреча не найдена' });
+    return;
+  }
+  const analysis = getAnalysis(meetingId);
+  if (!analysis) {
+    response.status(404).json({ error: 'Анализ ещё не выполнен' });
+    return;
+  }
+  response.json(analysis);
+});
 
 const clientDist = path.resolve('client/dist');
 if (process.env.NODE_ENV === 'production') {
@@ -195,6 +296,14 @@ if (process.env.NODE_ENV === 'production') {
 
 app.use((error: unknown, _request: express.Request, response: express.Response, _next: express.NextFunction) => {
   console.error(error);
+  if (error instanceof AIProviderUnavailableError) {
+    response.status(503).json({ error: error.message, code: error.code });
+    return;
+  }
+  if (error instanceof AnalysisValidationError) {
+    response.status(422).json({ error: error.message, code: error.code });
+    return;
+  }
   if (error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE') {
     response.status(413).json({ error: `Файл превышает допустимый размер ${process.env.MAX_AUDIO_SIZE_MB ?? 250} МБ` });
     return;

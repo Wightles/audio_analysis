@@ -18,3 +18,27 @@ export interface DashboardStats {
   analyzedMeetings: number;
   averageScore: number | null;
 }
+
+export interface TranscriptSegment {
+  startSeconds: number | null;
+  endSeconds: number | null;
+  speaker: string | null;
+  text: string;
+}
+
+export interface TranscriptRecord {
+  id: number | null;
+  meetingId: number;
+  content: string;
+  segments: TranscriptSegment[];
+  updatedAt: string | null;
+}
+
+export interface AnalysisRecord {
+  id: number;
+  meetingId: number;
+  score: number | null;
+  coverage: number | null;
+  result: unknown;
+  createdAt: string;
+}

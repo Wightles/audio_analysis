@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';
-import type { DashboardStats, Meeting, MeetingStatus } from './types.js';
+import type { AnalysisRecord, DashboardStats, Meeting, MeetingStatus, TranscriptRecord, TranscriptSegment } from './types.js';
 
 const dataDirectory = path.resolve(process.env.DATA_DIR ?? 'server/data');
 fs.mkdirSync(dataDirectory, { recursive: true });
@@ -132,6 +132,66 @@ export const deleteMeeting = (id: number): { deleted: boolean; audioPath: string
   if (!meeting) return { deleted: false, audioPath: null };
   db.prepare('DELETE FROM meetings WHERE id = ?').run(id);
   return { deleted: true, audioPath: meeting.audioPath };
+};
+
+const parseSegments = (value: unknown): TranscriptSegment[] => {
+  if (typeof value !== 'string') return [];
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed) ? parsed as TranscriptSegment[] : [];
+  } catch {
+    return [];
+  }
+};
+
+const mapTranscript = (row: Record<string, unknown> | undefined, meetingId: number): TranscriptRecord => ({
+  id: row ? Number(row.id) : null,
+  meetingId,
+  content: row ? String(row.content) : '',
+  segments: row ? parseSegments(row.segments_json) : [],
+  updatedAt: row ? String(row.updated_at) : null,
+});
+
+export const getTranscript = (meetingId: number): TranscriptRecord => {
+  const row = db.prepare('SELECT * FROM transcripts WHERE meeting_id = ?').get(meetingId) as Record<string, unknown> | undefined;
+  return mapTranscript(row, meetingId);
+};
+
+export const upsertTranscript = (meetingId: number, content: string, segments: TranscriptSegment[]): TranscriptRecord => {
+  db.prepare(`
+    INSERT INTO transcripts (meeting_id, content, segments_json, updated_at)
+    VALUES (@meetingId, @content, @segmentsJson, CURRENT_TIMESTAMP)
+    ON CONFLICT(meeting_id) DO UPDATE SET
+      content = excluded.content,
+      segments_json = excluded.segments_json,
+      updated_at = CURRENT_TIMESTAMP
+  `).run({ meetingId, content, segmentsJson: JSON.stringify(segments) });
+  return getTranscript(meetingId);
+};
+
+export const setMeetingStatus = (meetingId: number, status: MeetingStatus): void => {
+  db.prepare('UPDATE meetings SET status = ? WHERE id = ?').run(status, meetingId);
+};
+
+export const getAnalysis = (meetingId: number): AnalysisRecord | null => {
+  const row = db.prepare('SELECT * FROM analyses WHERE meeting_id = ?').get(meetingId) as Record<string, unknown> | undefined;
+  if (!row) return null;
+  let result: unknown = {};
+  try { result = JSON.parse(String(row.result_json)); } catch { result = {}; }
+  return { id: Number(row.id), meetingId, score: row.score === null ? null : Number(row.score), coverage: row.coverage === null ? null : Number(row.coverage), result, createdAt: String(row.created_at) };
+};
+
+export const saveAnalysis = (meetingId: number, score: number | null, coverage: number, result: unknown): AnalysisRecord => {
+  db.prepare(`
+    INSERT INTO analyses (meeting_id, score, coverage, result_json, created_at)
+    VALUES (@meetingId, @score, @coverage, @resultJson, CURRENT_TIMESTAMP)
+    ON CONFLICT(meeting_id) DO UPDATE SET
+      score = excluded.score,
+      coverage = excluded.coverage,
+      result_json = excluded.result_json,
+      created_at = CURRENT_TIMESTAMP
+  `).run({ meetingId, score, coverage, resultJson: JSON.stringify(result) });
+  return getAnalysis(meetingId) as AnalysisRecord;
 };
 
 export const getDashboardStats = (): DashboardStats => {

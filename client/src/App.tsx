@@ -95,11 +95,36 @@ function NewMeetingPage({ onCreated }: { onCreated: () => Promise<void> }) {
 }
 
 function MeetingDetailsPage() {
-  const { id } = useParams(); const [meeting, setMeeting] = useState<Meeting | null>(null); const [error, setError] = useState('');
-  useEffect(() => { if (id) api.meeting(Number(id)).then(setMeeting).catch((cause) => setError(cause instanceof Error ? cause.message : 'Не удалось загрузить встречу')); }, [id]);
+  const { id } = useParams();
+  const meetingId = Number(id);
+  const [meeting, setMeeting] = useState<Meeting | null>(null);
+  const [transcript, setTranscript] = useState('');
+  const [error, setError] = useState('');
+  const [transcriptError, setTranscriptError] = useState('');
+  const [savingTranscript, setSavingTranscript] = useState(false);
+  const [transcriptSaved, setTranscriptSaved] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
+
+  useEffect(() => {
+    if (!id) return;
+    Promise.all([api.meeting(meetingId), api.transcript(meetingId)]).then(([nextMeeting, nextTranscript]) => {
+      setMeeting(nextMeeting);
+      setTranscript(nextTranscript.content);
+    }).catch((cause) => setError(cause instanceof Error ? cause.message : 'Не удалось загрузить встречу'));
+  }, [id, meetingId]);
+
+  const saveTranscript = async () => {
+    setSavingTranscript(true); setTranscriptError(''); setTranscriptSaved(false);
+    try { const result = await api.saveTranscript(meetingId, transcript); setTranscript(result.content); setTranscriptSaved(true); } catch (cause) { setTranscriptError(cause instanceof Error ? cause.message : 'Не удалось сохранить расшифровку'); } finally { setSavingTranscript(false); }
+  };
+  const requestTranscription = async () => {
+    setTranscribing(true); setTranscriptError('');
+    try { const result = await api.transcribe(meetingId); setTranscript(result.transcript.content); } catch (cause) { setTranscriptError(cause instanceof Error ? cause.message : 'ИИ-провайдер пока не подключён'); } finally { setTranscribing(false); }
+  };
+
   if (error) return <div className="empty-page"><div className="empty-icon"><BarChart3 size={24} /></div><h1>Не удалось открыть встречу</h1><p>{error}</p><Link className="button button-secondary" to="/meetings">Вернуться к истории</Link></div>;
   if (!meeting) return <div className="loading-screen">Загрузка встречи…</div>;
-  return <><div className="page-heading"><div><p className="eyebrow">Карточка встречи</p><h1>{meeting.title}</h1><p className="muted">{meeting.managerName} · {formatDate(meeting.meetingDate)}</p></div><Link className="button button-secondary" to="/meetings">К истории</Link></div><section className="details-grid"><div className="form-card detail-card"><div className="section-header"><div><p className="eyebrow">Аудиозапись</p><h2>{meeting.originalFilename ?? 'Файл не добавлен'}</h2></div><span className="status-badge neutral">{meeting.status === 'analyzed' ? 'Проанализирована' : 'Ожидает анализа'}</span></div>{meeting.audioPath ? <audio className="saved-audio" controls preload="metadata" src={api.audioUrl(meeting.id)} /> : <div className="notice"><FileAudio size={18} /><span>Аудиозапись ещё не добавлена.</span></div>}<div className="detail-meta"><div><span>Менеджер</span><strong>{meeting.managerName}</strong></div><div><span>Дата</span><strong>{formatDate(meeting.meetingDate)}</strong></div><div><span>Длительность</span><strong>{formatDuration(meeting.duration)}</strong></div></div></div><div className="form-card detail-card muted-report"><div className="empty-icon light"><BarChart3 size={22} /></div><p className="eyebrow">Анализ встречи</p><h2>ИИ-провайдер пока не подключён</h2><p>После подключения транскрибации и анализа здесь появятся расшифровка, оценка по девяти этапам и полный отчёт Royal Brick. Случайные оценки не отображаются.</p></div></section></>;
+  return <><div className="page-heading"><div><p className="eyebrow">Карточка встречи</p><h1>{meeting.title}</h1><p className="muted">{meeting.managerName} · {formatDate(meeting.meetingDate)}</p></div><Link className="button button-secondary" to="/meetings">К истории</Link></div><section className="details-grid"><div className="form-card detail-card"><div className="section-header"><div><p className="eyebrow">Аудиозапись</p><h2>{meeting.originalFilename ?? 'Файл не добавлен'}</h2></div><span className="status-badge neutral">{meeting.status === 'analyzed' ? 'Проанализирована' : 'Ожидает анализа'}</span></div>{meeting.audioPath ? <audio className="saved-audio" controls preload="metadata" src={api.audioUrl(meeting.id)} /> : <div className="notice"><FileAudio size={18} /><span>Аудиозапись ещё не добавлена.</span></div>}<div className="detail-meta"><div><span>Менеджер</span><strong>{meeting.managerName}</strong></div><div><span>Дата</span><strong>{formatDate(meeting.meetingDate)}</strong></div><div><span>Длительность</span><strong>{formatDuration(meeting.duration)}</strong></div></div></div><div className="form-card detail-card muted-report"><div className="empty-icon light"><BarChart3 size={22} /></div><p className="eyebrow">Анализ встречи</p><h2>ИИ-провайдер пока не подключён</h2><p>После подключения транскрибации и анализа здесь появятся расшифровка, оценка по девяти этапам и полный отчёт Royal Brick. Случайные оценки не отображаются.</p></div></section><section className="form-card transcript-card"><div className="section-header"><div><p className="eyebrow">Расшифровка</p><h2>Текст встречи</h2><p className="muted">Текст можно исправить вручную. Цитаты для будущего анализа должны оставаться подтверждаемыми по записи.</p></div><button className="button button-secondary" onClick={() => void requestTranscription()} disabled={transcribing || !meeting.audioPath}>{transcribing ? 'Запрашиваем…' : 'Запустить расшифровку'}</button></div><textarea className="transcript-editor" value={transcript} onChange={(event) => { setTranscript(event.target.value); setTranscriptSaved(false); }} placeholder="Расшифровка пока отсутствует. Добавьте текст вручную или подключите ИИ-провайдер." />{transcriptError && <p className="form-error">{transcriptError}</p>}<div className="transcript-actions"><button className="button button-primary" onClick={() => void saveTranscript()} disabled={savingTranscript}>{savingTranscript ? 'Сохраняем…' : 'Сохранить расшифровку'}</button>{transcriptSaved && <span className="success-text"><Check size={15} />Сохранено</span>}</div></section></>;
 }
 
 export default function App() {

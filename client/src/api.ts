@@ -17,6 +17,21 @@ export interface DashboardStats {
   averageScore: number | null;
 }
 
+export interface TranscriptSegment {
+  startSeconds: number | null;
+  endSeconds: number | null;
+  speaker: string | null;
+  text: string;
+}
+
+export interface TranscriptRecord {
+  id: number | null;
+  meetingId: number;
+  content: string;
+  segments: TranscriptSegment[];
+  updatedAt: string | null;
+}
+
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const headers = new Headers(options?.headers);
   if (!(options?.body instanceof FormData)) headers.set('Content-Type', 'application/json');
@@ -36,6 +51,9 @@ export const api = {
   stats: () => request<DashboardStats>('/api/dashboard/stats'),
   meetings: () => request<Meeting[]>('/api/meetings'),
   meeting: (id: number) => request<Meeting>(`/api/meetings/${id}`),
+  transcript: (id: number) => request<TranscriptRecord>(`/api/meetings/${id}/transcript`),
+  saveTranscript: (id: number, content: string, segments: TranscriptSegment[] = []) => request<TranscriptRecord>(`/api/meetings/${id}/transcript`, { method: 'PUT', body: JSON.stringify({ content, segments }) }),
+  transcribe: (id: number) => request<{ transcript: TranscriptRecord; provider: string; language: string | null }>(`/api/meetings/${id}/transcribe`, { method: 'POST', body: JSON.stringify({}) }),
   createMeeting: (input: { title: string; managerName: string; meetingDate: string }) => request<Meeting>('/api/meetings', { method: 'POST', body: JSON.stringify(input) }),
   uploadAudio: (id: number, file: Blob, filename: string, duration: number | null, consentType: 'recording' | 'audio_upload', confirmedAt: string) => {
     const form = new FormData();
