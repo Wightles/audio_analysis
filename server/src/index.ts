@@ -28,6 +28,7 @@ const maxAudioSize = Number(process.env.MAX_AUDIO_SIZE_MB ?? 250) * 1024 * 1024;
 const allowedExtensions = new Set(['.mp3', '.wav', '.webm', '.m4a']);
 const allowedMimeTypes = new Set(['audio/mpeg', 'audio/wav', 'audio/x-wav', 'audio/wave', 'audio/webm', 'audio/mp4', 'audio/x-m4a', 'video/mp4', 'application/octet-stream']);
 const consentVersion = '1.0';
+const royalBrickSystemPrompt = fs.readFileSync(path.resolve('server/prompts/royal-brick-system-prompt.txt'), 'utf8');
 const aiProvider = AIProviderFactory.create();
 const transcriptionService = new TranscriptionService(aiProvider);
 const meetingAnalysisService = new MeetingAnalysisService(aiProvider);
@@ -264,7 +265,7 @@ app.post('/api/meetings/:id/analyze', async (request, response, next) => {
     response.status(400).json({ error: 'Сначала добавьте или получите расшифровку встречи' });
     return;
   }
-  const context: MeetingContext = { meetingId, managerName: meeting.managerName, meetingDate: meeting.meetingDate };
+  const context: MeetingContext = { meetingId, managerName: meeting.managerName, meetingDate: meeting.meetingDate, systemPrompt: royalBrickSystemPrompt };
   try {
     setMeetingStatus(meetingId, 'analyzing');
     const report = await meetingAnalysisService.analyze({ content: transcript.content, segments: transcript.segments, language: null, provider: 'manual' }, context);

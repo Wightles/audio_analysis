@@ -5,7 +5,7 @@
 Архитектура разделяет два этапа:
 
 1. `TranscriptionService` получает аудио через `AIProvider.transcribeAudio()` и сохраняет расшифровку.
-2. `MeetingAnalysisService` получает `TranscriptionResult` и `MeetingContext`, затем сохраняет полный `RoyalBrickReport`.
+2. `MeetingAnalysisService` получает `TranscriptionResult` и `MeetingContext`, включая полный системный промпт Royal Brick, затем сохраняет полный `RoyalBrickReport`.
 
 Контракт провайдера находится в `server/src/ai/provider.ts`, фабрика — в `server/src/ai/factory.ts`. Для нового сервиса нужно реализовать интерфейс `AIProvider` и зарегистрировать реализацию в фабрике. Ключи должны оставаться только в backend `.env`.
 

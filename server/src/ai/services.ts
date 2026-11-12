@@ -5,6 +5,7 @@ export interface MeetingContext {
   meetingId: number;
   managerName: string;
   meetingDate: string;
+  systemPrompt: string;
   crmData?: string;
   clientHistory?: string;
   companyRules?: string;

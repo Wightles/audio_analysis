@@ -47,6 +47,19 @@ export const validateCriteria = (criteria: CriterionEvaluation[]): ScoreSummary 
 };
 
 export const validateRoyalBrickReport = (report: RoyalBrickReport): ScoreSummary => {
+  const candidate = report as unknown as Record<string, unknown>;
+  const requiredArrays = ['managerStrengths', 'managerErrors', 'objections', 'managerRecommendations', 'criticalViolations'];
+  const requiredObjects = ['meetingCard', 'overallAssessment', 'clientAnalysis', 'missedSalesOpportunity', 'clientRecommendations'];
+  if (candidate.reportVersion !== '1.0') throw new AnalysisValidationError('Неподдерживаемая версия отчёта Royal Brick');
+  for (const key of requiredArrays) if (!Array.isArray(candidate[key])) throw new AnalysisValidationError(`В отчёте отсутствует массив «${key}»`);
+  for (const key of requiredObjects) if (!candidate[key] || typeof candidate[key] !== 'object') throw new AnalysisValidationError(`В отчёте отсутствует раздел «${key}»`);
+  for (const key of ['nextCallScript', 'clientMessage', 'crmSummary', 'managerConclusion']) if (typeof candidate[key] !== 'string') throw new AnalysisValidationError(`В отчёте отсутствует текстовое поле «${key}»`);
+  const overall = candidate.overallAssessment as Record<string, unknown>;
+  if (typeof overall.summary !== 'string' || !overall.priceSequence || typeof overall.priceSequence !== 'object') throw new AnalysisValidationError('Раздел общей оценки имеет неполный формат');
+  const client = candidate.clientAnalysis as Record<string, unknown>;
+  for (const key of ['additionalFeatures', 'keyCriteria', 'explicitConcerns', 'probableConcerns', 'positiveReactions', 'negativeReactions']) if (!Array.isArray(client[key])) throw new AnalysisValidationError(`Раздел анализа клиента имеет неполное поле «${key}»`);
+  const recommendations = candidate.clientRecommendations as Record<string, unknown>;
+  for (const key of ['arguments', 'materials', 'avoidSaying']) if (!Array.isArray(recommendations[key])) throw new AnalysisValidationError(`Раздел рекомендаций имеет неполное поле «${key}»`);
   const summary = validateCriteria(report.overallAssessment.criteria);
   const reportedScore = report.overallAssessment.score;
   const reportedCoverage = report.overallAssessment.coverage;
