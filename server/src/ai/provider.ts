@@ -35,3 +35,11 @@ export class AIProviderUnavailableError extends Error {
     this.name = 'AIProviderUnavailableError';
   }
 }
+
+export class AIProviderRequestError extends Error {
+  readonly code = 'AI_PROVIDER_REQUEST_FAILED';
+  constructor(message: string) {
+    super(message);
+    this.name = 'AIProviderRequestError';
+  }
+}

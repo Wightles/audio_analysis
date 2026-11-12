@@ -9,7 +9,7 @@ import { z } from 'zod';
 import { attachAudio, createMeeting, db, deleteMeeting, findMeeting, getAnalysis, getDashboardStats, getTranscript, listMeetings, saveAnalysis, setMeetingStatus, upsertTranscript } from './db.js';
 import { isAuthenticated, login, logout, requireAuth } from './auth.js';
 import { AIProviderFactory } from './ai/factory.js';
-import { AIProviderUnavailableError } from './ai/provider.js';
+import { AIProviderRequestError, AIProviderUnavailableError } from './ai/provider.js';
 import { MeetingAnalysisService, TranscriptionService, type MeetingContext } from './ai/services.js';
 import { AnalysisValidationError, validateRoyalBrickReport } from './ai/validation.js';
 
@@ -308,6 +308,10 @@ app.use((error: unknown, _request: express.Request, response: express.Response, 
   console.error(error);
   if (error instanceof AIProviderUnavailableError) {
     response.status(503).json({ error: error.message, code: error.code });
+    return;
+  }
+  if (error instanceof AIProviderRequestError) {
+    response.status(502).json({ error: error.message, code: error.code });
     return;
   }
   if (error instanceof AnalysisValidationError) {
