@@ -30,6 +30,8 @@ db.exec(`
     meeting_id INTEGER NOT NULL UNIQUE,
     content TEXT NOT NULL DEFAULT '',
     segments_json TEXT NOT NULL DEFAULT '[]',
+    source_start_seconds REAL,
+    source_end_seconds REAL,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
   );
@@ -40,6 +42,8 @@ db.exec(`
     score REAL,
     coverage REAL,
     result_json TEXT NOT NULL,
+    source_start INTEGER,
+    source_end INTEGER,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
   );
@@ -61,6 +65,22 @@ for (const column of [
 ] as const) {
   const exists = db.prepare('SELECT 1 FROM pragma_table_info(\'meetings\') WHERE name = ?').get(column[0]);
   if (!exists) db.exec(`ALTER TABLE meetings ADD COLUMN ${column[0]} ${column[1]}`);
+}
+
+for (const column of [
+  ['source_start', 'INTEGER'],
+  ['source_end', 'INTEGER'],
+] as const) {
+  const exists = db.prepare('SELECT 1 FROM pragma_table_info(\'analyses\') WHERE name = ?').get(column[0]);
+  if (!exists) db.exec(`ALTER TABLE analyses ADD COLUMN ${column[0]} ${column[1]}`);
+}
+
+for (const column of [
+  ['source_start_seconds', 'REAL'],
+  ['source_end_seconds', 'REAL'],
+] as const) {
+  const exists = db.prepare('SELECT 1 FROM pragma_table_info(\'transcripts\') WHERE name = ?').get(column[0]);
+  if (!exists) db.exec(`ALTER TABLE transcripts ADD COLUMN ${column[0]} ${column[1]}`);
 }
 
 const mapMeeting = (row: Record<string, unknown>): Meeting => ({
@@ -149,6 +169,8 @@ const mapTranscript = (row: Record<string, unknown> | undefined, meetingId: numb
   meetingId,
   content: row ? String(row.content) : '',
   segments: row ? parseSegments(row.segments_json) : [],
+  sourceStartSeconds: row?.source_start_seconds === null || row?.source_start_seconds === undefined ? null : Number(row.source_start_seconds),
+  sourceEndSeconds: row?.source_end_seconds === null || row?.source_end_seconds === undefined ? null : Number(row.source_end_seconds),
   updatedAt: row ? String(row.updated_at) : null,
 });
 
@@ -157,15 +179,17 @@ export const getTranscript = (meetingId: number): TranscriptRecord => {
   return mapTranscript(row, meetingId);
 };
 
-export const upsertTranscript = (meetingId: number, content: string, segments: TranscriptSegment[]): TranscriptRecord => {
+export const upsertTranscript = (meetingId: number, content: string, segments: TranscriptSegment[], sourceStartSeconds: number | null = null, sourceEndSeconds: number | null = null): TranscriptRecord => {
   db.prepare(`
-    INSERT INTO transcripts (meeting_id, content, segments_json, updated_at)
-    VALUES (@meetingId, @content, @segmentsJson, CURRENT_TIMESTAMP)
+    INSERT INTO transcripts (meeting_id, content, segments_json, source_start_seconds, source_end_seconds, updated_at)
+    VALUES (@meetingId, @content, @segmentsJson, @sourceStartSeconds, @sourceEndSeconds, CURRENT_TIMESTAMP)
     ON CONFLICT(meeting_id) DO UPDATE SET
       content = excluded.content,
       segments_json = excluded.segments_json,
+      source_start_seconds = excluded.source_start_seconds,
+      source_end_seconds = excluded.source_end_seconds,
       updated_at = CURRENT_TIMESTAMP
-  `).run({ meetingId, content, segmentsJson: JSON.stringify(segments) });
+  `).run({ meetingId, content, segmentsJson: JSON.stringify(segments), sourceStartSeconds, sourceEndSeconds });
   return getTranscript(meetingId);
 };
 
@@ -178,20 +202,26 @@ export const getAnalysis = (meetingId: number): AnalysisRecord | null => {
   if (!row) return null;
   let result: unknown = {};
   try { result = JSON.parse(String(row.result_json)); } catch { result = {}; }
-  return { id: Number(row.id), meetingId, score: row.score === null ? null : Number(row.score), coverage: row.coverage === null ? null : Number(row.coverage), result, createdAt: String(row.created_at) };
+  return { id: Number(row.id), meetingId, score: row.score === null ? null : Number(row.score), coverage: row.coverage === null ? null : Number(row.coverage), result, sourceStartSeconds: row.source_start === null ? null : Number(row.source_start), sourceEndSeconds: row.source_end === null ? null : Number(row.source_end), createdAt: String(row.created_at) };
 };
 
-export const saveAnalysis = (meetingId: number, score: number | null, coverage: number, result: unknown): AnalysisRecord => {
+export const saveAnalysis = (meetingId: number, score: number | null, coverage: number, result: unknown, sourceStartSeconds: number | null = null, sourceEndSeconds: number | null = null): AnalysisRecord => {
   db.prepare(`
-    INSERT INTO analyses (meeting_id, score, coverage, result_json, created_at)
-    VALUES (@meetingId, @score, @coverage, @resultJson, CURRENT_TIMESTAMP)
+    INSERT INTO analyses (meeting_id, score, coverage, result_json, source_start, source_end, created_at)
+    VALUES (@meetingId, @score, @coverage, @resultJson, @sourceStartSeconds, @sourceEndSeconds, CURRENT_TIMESTAMP)
     ON CONFLICT(meeting_id) DO UPDATE SET
       score = excluded.score,
       coverage = excluded.coverage,
       result_json = excluded.result_json,
+      source_start = excluded.source_start,
+      source_end = excluded.source_end,
       created_at = CURRENT_TIMESTAMP
-  `).run({ meetingId, score, coverage, resultJson: JSON.stringify(result) });
+  `).run({ meetingId, score, coverage, resultJson: JSON.stringify(result), sourceStartSeconds, sourceEndSeconds });
   return getAnalysis(meetingId) as AnalysisRecord;
+};
+
+export const clearAnalysis = (meetingId: number): void => {
+  db.prepare('DELETE FROM analyses WHERE meeting_id = ?').run(meetingId);
 };
 
 export const getDashboardStats = (): DashboardStats => {

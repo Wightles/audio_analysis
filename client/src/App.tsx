@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ChangeEvent, type FormEvent, type ReactNode } from 'react';
 import { Link, NavLink, Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { BarChart3, CalendarDays, Check, ChevronRight, ClipboardList, FileAudio, Home, LogOut, Mic, Pause, Plus, ShieldCheck, Trash2, Upload } from 'lucide-react';
-import { api, type AnalysisRecord, type DashboardStats, type Meeting } from './api';
+import { api, type AICapacity, type AnalysisRecord, type DashboardStats, type Meeting } from './api';
 import type { EvidenceItem, RoyalBrickReport } from './report';
 
 const MAX_AUDIO_SIZE_MB = 250;
@@ -13,6 +13,7 @@ const formatDuration = (seconds: number | null) => {
   if (seconds < 60) return `${seconds} сек`;
   return `${Math.floor(seconds / 60)} мин ${seconds % 60} сек`;
 };
+const formatTimecode = (seconds: number) => `${Math.floor(Math.max(0, seconds) / 60)}:${String(Math.floor(Math.max(0, seconds) % 60)).padStart(2, '0')}`;
 
 function LoginPage({ onLogin }: { onLogin: () => void }) {
   const [password, setPassword] = useState('');
@@ -138,6 +139,17 @@ function MeetingDetailsPage() {
   const [analysis, setAnalysis] = useState<AnalysisRecord | null>(null);
   const [analysisError, setAnalysisError] = useState('');
   const [analyzing, setAnalyzing] = useState(false);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const audioSourceRef = useRef<MediaElementAudioSourceNode | null>(null);
+  const audioOutputConnectedRef = useRef(false);
+  const [audioDuration, setAudioDuration] = useState(0);
+  const [fragmentStart, setFragmentStart] = useState(0);
+  const [fragmentEnd, setFragmentEnd] = useState(0);
+  const [fragmentTranscribing, setFragmentTranscribing] = useState(false);
+  const [transcriptSource, setTranscriptSource] = useState<{ start: number; end: number } | null>(null);
+  const [transcriptSelection, setTranscriptSelection] = useState({ start: 0, end: 0 });
+  const [aiCapacity, setAICapacity] = useState<AICapacity | null>(null);
 
   useEffect(() => {
     if (!id) return;
@@ -145,29 +157,123 @@ function MeetingDetailsPage() {
       if (cause instanceof Error && cause.message === 'Анализ ещё не выполнен') return null;
       throw cause;
     });
-    Promise.all([api.meeting(meetingId), api.transcript(meetingId), existingAnalysis]).then(([nextMeeting, nextTranscript, nextAnalysis]) => {
+    const capacity = api.aiCapacity().catch(() => null);
+    Promise.all([api.meeting(meetingId), api.transcript(meetingId), existingAnalysis, capacity]).then(([nextMeeting, nextTranscript, nextAnalysis, nextCapacity]) => {
       setMeeting(nextMeeting);
       setTranscript(nextTranscript.content);
+      setAICapacity(nextCapacity);
+      setTranscriptSource(nextTranscript.sourceStartSeconds !== null && nextTranscript.sourceEndSeconds !== null ? { start: nextTranscript.sourceStartSeconds, end: nextTranscript.sourceEndSeconds } : null);
+      setFragmentStart(0);
+      setFragmentEnd(nextMeeting.duration ?? 0);
+      setTranscriptSelection({ start: 0, end: 0 });
       setAnalysis(nextAnalysis);
     }).catch((cause) => setError(cause instanceof Error ? cause.message : 'Не удалось загрузить встречу'));
   }, [id, meetingId]);
 
   const saveTranscript = async () => {
     setSavingTranscript(true); setTranscriptError(''); setTranscriptSaved(false);
-    try { const result = await api.saveTranscript(meetingId, transcript); setTranscript(result.content); setTranscriptSaved(true); } catch (cause) { setTranscriptError(cause instanceof Error ? cause.message : 'Не удалось сохранить расшифровку'); } finally { setSavingTranscript(false); }
+    try { const result = await api.saveTranscript(meetingId, transcript); setTranscript(result.content); setTranscriptSource(null); setTranscriptSelection({ start: 0, end: 0 }); setTranscriptSaved(true); } catch (cause) { setTranscriptError(cause instanceof Error ? cause.message : 'Не удалось сохранить расшифровку'); } finally { setSavingTranscript(false); }
   };
   const requestTranscription = async () => {
     setTranscribing(true); setTranscriptError('');
-    try { const result = await api.transcribe(meetingId); setTranscript(result.transcript.content); } catch (cause) { setTranscriptError(cause instanceof Error ? cause.message : 'ИИ-провайдер пока не подключён'); } finally { setTranscribing(false); }
+    try { const result = await api.transcribe(meetingId); setTranscript(result.transcript.content); setTranscriptSource(null); setTranscriptSelection({ start: 0, end: 0 }); setAnalysis(null); } catch (cause) { setTranscriptError(cause instanceof Error ? cause.message : 'ИИ-провайдер пока не подключён'); } finally { setTranscribing(false); }
   };
   const runAnalysis = async () => {
     setAnalyzing(true); setAnalysisError('');
     try { setAnalysis(await api.analyze(meetingId)); } catch (cause) { setAnalysisError(cause instanceof Error ? cause.message : 'ИИ-провайдер пока не подключён'); } finally { setAnalyzing(false); }
   };
+  const onAudioMetadata = () => {
+    const duration = audioRef.current?.duration ?? 0;
+    if (!Number.isFinite(duration) || duration <= 0) return;
+    setAudioDuration(duration);
+    setFragmentEnd((current) => current > 0 && current <= duration ? current : duration);
+  };
+  const captureAudioFragment = async (): Promise<{ blob: Blob; mimeType: string }> => {
+    const audio = audioRef.current;
+    if (!audio || !audioDuration || fragmentEnd <= fragmentStart) throw new Error('Выберите корректный фрагмент аудиозаписи');
+    const AudioContextConstructor = window.AudioContext ?? (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AudioContextConstructor || !window.MediaRecorder) throw new Error('Этот браузер не поддерживает запись выбранного фрагмента');
+    const context = audioContextRef.current ?? new AudioContextConstructor();
+    audioContextRef.current = context;
+    const source = audioSourceRef.current ?? context.createMediaElementSource(audio);
+    audioSourceRef.current = source;
+    const destination = context.createMediaStreamDestination();
+    source.connect(destination);
+    if (!audioOutputConnectedRef.current) {
+      source.connect(context.destination);
+      audioOutputConnectedRef.current = true;
+    }
+    const mimeType = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'].find((type) => MediaRecorder.isTypeSupported(type)) ?? '';
+    if (!mimeType) throw new Error('В браузере нет поддерживаемого формата записи фрагмента');
+    const recorder = new MediaRecorder(destination.stream, { mimeType });
+    const chunks: BlobPart[] = [];
+    const blobPromise = new Promise<Blob>((resolve, reject) => {
+      recorder.ondataavailable = (event) => { if (event.data.size > 0) chunks.push(event.data); };
+      recorder.onerror = () => reject(new Error('Не удалось подготовить аудиофрагмент'));
+      recorder.onstop = () => resolve(new Blob(chunks, { type: mimeType }));
+    });
+    const previousTime = audio.currentTime;
+    const stopAtEnd = () => {
+      if (audio.currentTime >= fragmentEnd && recorder.state !== 'inactive') {
+        audio.pause();
+        recorder.stop();
+      }
+    };
+    audio.addEventListener('timeupdate', stopAtEnd);
+    audio.currentTime = fragmentStart;
+    await context.resume();
+    recorder.start(250);
+    try {
+      await audio.play();
+      await new Promise<void>((resolve) => window.setTimeout(resolve, Math.ceil((fragmentEnd - fragmentStart + 2) * 1000)));
+      if (recorder.state !== 'inactive') { audio.pause(); recorder.stop(); }
+      const blob = await blobPromise;
+      return { blob, mimeType };
+    } finally {
+      audio.removeEventListener('timeupdate', stopAtEnd);
+      audio.pause();
+      if (recorder.state !== 'inactive') recorder.stop();
+      audio.currentTime = previousTime;
+      source.disconnect(destination);
+    }
+  };
+  const requestFragmentTranscription = async () => {
+    if (fragmentEnd <= fragmentStart || !audioDuration) {
+      setTranscriptError('Укажите корректный фрагмент аудиозаписи');
+      return;
+    }
+    setFragmentTranscribing(true); setTranscriptError(''); setAnalysisError('');
+    try {
+      const captured = await captureAudioFragment();
+      const extension = captured.mimeType.includes('mp4') ? 'm4a' : 'webm';
+      const result = await api.transcribeFragment(meetingId, captured.blob, `fragment-${Math.round(fragmentStart)}-${Math.round(fragmentEnd)}.${extension}`, fragmentStart, fragmentEnd);
+      setTranscript(result.transcript.content);
+      setTranscriptSource({ start: fragmentStart, end: fragmentEnd });
+      setAnalysis(null);
+    } catch (cause) {
+      setTranscriptError(cause instanceof Error ? cause.message : 'Не удалось расшифровать выбранный фрагмент');
+    } finally {
+      setFragmentTranscribing(false);
+    }
+  };
+  const selectionStart = Math.max(0, Math.min(transcriptSelection.start, transcript.length));
+  const selectionEnd = Math.max(selectionStart, Math.min(transcriptSelection.end, transcript.length));
+  const selectedTranscriptText = transcript.slice(selectionStart, selectionEnd).trim();
+  const analyzeSelectedText = () => {
+    if (!selectedTranscriptText) {
+      setAnalysisError('Сначала выделите нужный текст мышью');
+      return;
+    }
+    setAnalyzing(true); setAnalysisError('');
+    void api.analyze(meetingId, { startChar: selectionStart, endChar: selectionEnd }).then(setAnalysis).catch((cause) => setAnalysisError(cause instanceof Error ? cause.message : 'ИИ-провайдер пока не подключён')).finally(() => setAnalyzing(false));
+  };
 
   if (error) return <div className="empty-page"><div className="empty-icon"><BarChart3 size={24} /></div><h1>Не удалось открыть встречу</h1><p>{error}</p><Link className="button button-secondary" to="/meetings">Вернуться к истории</Link></div>;
   if (!meeting) return <div className="loading-screen">Загрузка встречи…</div>;
-  return <><div className="page-heading"><div><p className="eyebrow">Карточка встречи</p><h1>{meeting.title}</h1><p className="muted">{meeting.managerName} · {formatDate(meeting.meetingDate)}</p></div><Link className="button button-secondary" to="/meetings">К истории</Link></div><section className="details-grid"><div className="form-card detail-card"><div className="section-header"><div><p className="eyebrow">Аудиозапись</p><h2>{meeting.originalFilename ?? 'Файл не добавлен'}</h2></div><span className="status-badge neutral">{meeting.status === 'analyzed' ? 'Проанализирована' : 'Ожидает анализа'}</span></div>{meeting.audioPath ? <audio className="saved-audio" controls preload="metadata" src={api.audioUrl(meeting.id)} /> : <div className="notice"><FileAudio size={18} /><span>Аудиозапись ещё не добавлена.</span></div>}<div className="detail-meta"><div><span>Менеджер</span><strong>{meeting.managerName}</strong></div><div><span>Дата</span><strong>{formatDate(meeting.meetingDate)}</strong></div><div><span>Длительность</span><strong>{formatDuration(meeting.duration)}</strong></div></div></div><div className="form-card detail-card muted-report"><div className="empty-icon light"><BarChart3 size={22} /></div><p className="eyebrow">Анализ встречи</p>{analysis ? <><h2>Отчёт сформирован</h2><p>{analysis.score === null ? 'Итоговая оценка недоступна.' : `Итоговая оценка: ${Math.round(analysis.score)}/100. Охват: ${Math.round(analysis.coverage ?? 0)}%.`}</p></> : <><h2>Анализ ещё не выполнен</h2><p>Оценки не выдумываются. Запустите анализ после подключения ИИ-провайдера и наличия расшифровки.</p><button className="button button-primary" onClick={() => void runAnalysis()} disabled={analyzing || !transcript.trim()}>{analyzing ? 'Анализируем…' : 'Запустить анализ'}</button></>}{analysisError && <p className="form-error">{analysisError}</p>}</div></section><section className="form-card transcript-card"><div className="section-header"><div><p className="eyebrow">Расшифровка</p><h2>Текст встречи</h2><p className="muted">Текст можно исправить вручную. Цитаты для будущего анализа должны оставаться подтверждаемыми по записи.</p></div><button className="button button-secondary" onClick={() => void requestTranscription()} disabled={transcribing || !meeting.audioPath}>{transcribing ? 'Запрашиваем…' : 'Запустить расшифровку'}</button></div><textarea className="transcript-editor" value={transcript} onChange={(event) => { setTranscript(event.target.value); setTranscriptSaved(false); }} placeholder="Расшифровка пока отсутствует. Добавьте текст вручную или подключите ИИ-провайдер." />{transcriptError && <p className="form-error">{transcriptError}</p>}<div className="transcript-actions"><button className="button button-primary" onClick={() => void saveTranscript()} disabled={savingTranscript}>{savingTranscript ? 'Сохраняем…' : 'Сохранить расшифровку'}</button>{transcriptSaved && <span className="success-text"><Check size={15} />Сохранено</span>}</div></section>{analysis && <ReportView analysis={analysis} />}</>;
+  const capacityText = aiCapacity === null ? 'Проверяем лимит Groq…' : aiCapacity.provider !== 'groq' ? 'Groq не подключён.' : aiCapacity.estimatedFragmentSecondsAvailable === null ? 'Не удалось определить лимит Groq.' : aiCapacity.estimatedFragmentSecondsAvailable <= 0 ? `При текущем лимите ${aiCapacity.tpmLimit?.toLocaleString('ru-RU')} TPM подходящего фрагмента нет: один системный промпт занимает примерно ${aiCapacity.estimatedSystemTokens?.toLocaleString('ru-RU')} токенов.` : `Ориентировочно доступно до ${formatTimecode(aiCapacity.estimatedFragmentSecondsAvailable)} аудио при лимите ${aiCapacity.tpmLimit?.toLocaleString('ru-RU')} TPM.`;
+  const analysisBlocked = aiCapacity?.provider === 'groq' && aiCapacity.estimatedFragmentSecondsAvailable === 0;
+  const analysisHasScore = analysis?.score !== null && analysis?.score !== undefined;
+  return <><div className="page-heading"><div><p className="eyebrow">Карточка встречи</p><h1>{meeting.title}</h1><p className="muted">{meeting.managerName} · {formatDate(meeting.meetingDate)}</p></div><Link className="button button-secondary" to="/meetings">К истории</Link></div><section className="details-grid"><div className="form-card detail-card"><div className="section-header"><div><p className="eyebrow">Аудиозапись</p><h2>{meeting.originalFilename ?? 'Файл не добавлен'}</h2></div><span className="status-badge neutral">{meeting.status === 'analyzed' ? 'Проанализирована' : 'Ожидает анализа'}</span></div>{meeting.audioPath ? <audio ref={audioRef} className="saved-audio" controls preload="metadata" src={api.audioUrl(meeting.id)} onLoadedMetadata={onAudioMetadata} /> : <div className="notice"><FileAudio size={18} /><span>Аудиозапись ещё не добавлена.</span></div>}<div className="audio-fragment-selector"><p className="eyebrow">Фрагмент аудио</p><h3>1. Выберите время</h3><p className="muted">Будут расшифрованы только указанные секунды. После этого текст можно проанализировать.</p><div className="fragment-range-grid"><label>Начало<input type="number" min="0" max={audioDuration} step="1" value={fragmentStart} onChange={(event) => setFragmentStart(Math.max(0, Math.min(Number(event.target.value), fragmentEnd)))} /> <small>{formatTimecode(fragmentStart)}</small></label><label>Конец<input type="number" min="0" max={audioDuration} step="1" value={fragmentEnd} onChange={(event) => setFragmentEnd(Math.max(fragmentStart, Math.min(Number(event.target.value), audioDuration)))} /> <small>{formatTimecode(fragmentEnd)}</small></label><span className="fragment-length">Длина: {formatTimecode(Math.max(0, fragmentEnd - fragmentStart))}</span></div><div className={aiCapacity?.estimatedFragmentSecondsAvailable === 0 ? 'fragment-capacity blocked' : 'fragment-capacity'}><strong>Ограничение анализа</strong><span>{capacityText}</span></div><button className="button button-primary" onClick={() => void requestFragmentTranscription()} disabled={fragmentTranscribing || transcribing || !audioDuration || fragmentEnd <= fragmentStart}>{fragmentTranscribing ? 'Расшифровываем…' : '2. Расшифровать этот фрагмент'}</button></div><div className="detail-meta"><div><span>Менеджер</span><strong>{meeting.managerName}</strong></div><div><span>Дата</span><strong>{formatDate(meeting.meetingDate)}</strong></div><div><span>Длительность</span><strong>{formatDuration(meeting.duration)}</strong></div></div></div><div className="form-card detail-card muted-report"><div className="empty-icon light"><BarChart3 size={22} /></div><p className="eyebrow">Анализ встречи</p>{analysis ? <><h2>{analysisHasScore ? 'Отчёт сформирован' : 'Фрагмент слишком короткий для оценки'}</h2><p>{analysisHasScore ? `Итоговая оценка: ${Math.round(analysis.score ?? 0)}/100. Охват: ${Math.round(analysis.coverage ?? 0)}%.` : 'Отчёт сохранён, но в выбранном фрагменте недостаточно подтверждённых данных для расчёта балла.'}</p><p className="analysis-scope">{analysis.sourceStartSeconds === null ? 'Обработана текущая расшифровка.' : `Обработан аудиофрагмент: ${formatTimecode(analysis.sourceStartSeconds)}–${formatTimecode(analysis.sourceEndSeconds ?? analysis.sourceStartSeconds)}.`}</p></> : <><h2>Анализ ещё не выполнен</h2><p>Сначала расшифруйте выбранный фрагмент. Оценки не выдумываются.</p><button className="button button-primary" onClick={() => void runAnalysis()} disabled={analyzing || !transcript.trim() || analysisBlocked}>{analyzing ? 'Анализируем…' : analysisBlocked ? 'Нужен больший лимит Groq' : '3. Запустить анализ текста'}</button></>}{analysisError && <p className="form-error">{analysisError}</p>}</div></section><section className="form-card transcript-card"><div className="section-header"><div><p className="eyebrow">Расшифровка выбранного фрагмента</p><h2>Текст встречи</h2><p className="muted">Здесь появится текст выбранного аудиоинтервала.</p></div></div>{transcriptSource && <div className="notice"><FileAudio size={18} /><span>Текст получен из аудио: {formatTimecode(transcriptSource.start)}–${formatTimecode(transcriptSource.end)}.</span></div>}<textarea className="transcript-editor" value={transcript} onChange={(event) => { setTranscript(event.target.value); setTranscriptSaved(false); }} onSelect={(event) => setTranscriptSelection({ start: event.currentTarget.selectionStart, end: event.currentTarget.selectionEnd })} placeholder="Сначала выберите время сверху и расшифруйте фрагмент." />{transcriptError && <p className="form-error">{transcriptError}</p>}<div className="transcript-actions"><button className="button button-primary" onClick={() => void saveTranscript()} disabled={savingTranscript}>{savingTranscript ? 'Сохраняем…' : 'Сохранить расшифровку'}</button>{transcriptSaved && <span className="success-text"><Check size={15} />Сохранено</span>}</div><div className="text-selection-panel"><p className="eyebrow">Точный выбор текста</p><h3>Выделите фразу для анализа</h3><p className="muted">Выделите мышью нужную часть текста прямо в поле выше. В анализ уйдёт только выделение.</p><div className="text-selection-summary">Выделено символов: <strong>{selectedTranscriptText.length.toLocaleString('ru-RU')}</strong>{selectedTranscriptText && <span> · «{selectedTranscriptText.slice(0, 140)}{selectedTranscriptText.length > 140 ? '…' : ''}»</span>}</div><button className="button button-secondary" onClick={analyzeSelectedText} disabled={analyzing || !selectedTranscriptText}>{analyzing ? 'Анализируем…' : 'Анализировать выделенный текст'}</button></div></section>{analysis && <ReportView analysis={analysis} />}</>;
 }
 
 export default function App() {

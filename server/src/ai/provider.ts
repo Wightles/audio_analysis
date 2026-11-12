@@ -37,9 +37,17 @@ export class AIProviderUnavailableError extends Error {
 }
 
 export class AIProviderRequestError extends Error {
-  readonly code = 'AI_PROVIDER_REQUEST_FAILED';
+  readonly code: string = 'AI_PROVIDER_REQUEST_FAILED';
   constructor(message: string) {
     super(message);
     this.name = 'AIProviderRequestError';
+  }
+}
+
+export class AIProviderLimitError extends AIProviderRequestError {
+  readonly code = 'AI_PROVIDER_LIMIT_EXCEEDED';
+  constructor(message: string) {
+    super(message);
+    this.name = 'AIProviderLimitError';
   }
 }

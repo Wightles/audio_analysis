@@ -55,7 +55,8 @@ export const validateRoyalBrickReport = (report: RoyalBrickReport): ScoreSummary
   for (const key of requiredObjects) if (!candidate[key] || typeof candidate[key] !== 'object') throw new AnalysisValidationError(`В отчёте отсутствует раздел «${key}»`);
   for (const key of ['nextCallScript', 'clientMessage', 'crmSummary', 'managerConclusion']) if (typeof candidate[key] !== 'string') throw new AnalysisValidationError(`В отчёте отсутствует текстовое поле «${key}»`);
   const overall = candidate.overallAssessment as Record<string, unknown>;
-  if (typeof overall.summary !== 'string' || !overall.priceSequence || typeof overall.priceSequence !== 'object') throw new AnalysisValidationError('Раздел общей оценки имеет неполный формат');
+  if (typeof overall.summary !== 'string') throw new AnalysisValidationError('В разделе общей оценки отсутствует поле summary');
+  if (!overall.priceSequence || typeof overall.priceSequence !== 'object') throw new AnalysisValidationError('В разделе общей оценки отсутствует поле priceSequence');
   const client = candidate.clientAnalysis as Record<string, unknown>;
   for (const key of ['additionalFeatures', 'keyCriteria', 'explicitConcerns', 'probableConcerns', 'positiveReactions', 'negativeReactions']) if (!Array.isArray(client[key])) throw new AnalysisValidationError(`Раздел анализа клиента имеет неполное поле «${key}»`);
   const recommendations = candidate.clientRecommendations as Record<string, unknown>;

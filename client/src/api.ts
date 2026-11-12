@@ -31,6 +31,8 @@ export interface TranscriptRecord {
   meetingId: number;
   content: string;
   segments: TranscriptSegment[];
+  sourceStartSeconds: number | null;
+  sourceEndSeconds: number | null;
   updatedAt: string | null;
 }
 
@@ -40,7 +42,17 @@ export interface AnalysisRecord {
   score: number | null;
   coverage: number | null;
   result: RoyalBrickReport;
+  sourceStartSeconds: number | null;
+  sourceEndSeconds: number | null;
   createdAt: string;
+}
+
+export interface AICapacity {
+  provider: string;
+  tpmLimit: number | null;
+  estimatedSystemTokens: number | null;
+  estimatedTranscriptTokensAvailable: number | null;
+  estimatedFragmentSecondsAvailable: number | null;
 }
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
@@ -60,12 +72,20 @@ export const api = {
   login: (password: string) => request<{ authenticated: boolean }>('/api/auth/login', { method: 'POST', body: JSON.stringify({ password }) }),
   logout: () => request<void>('/api/auth/logout', { method: 'POST' }),
   stats: () => request<DashboardStats>('/api/dashboard/stats'),
+  aiCapacity: () => request<AICapacity>('/api/ai/capacity'),
   meetings: () => request<Meeting[]>('/api/meetings'),
   meeting: (id: number) => request<Meeting>(`/api/meetings/${id}`),
   transcript: (id: number) => request<TranscriptRecord>(`/api/meetings/${id}/transcript`),
   saveTranscript: (id: number, content: string, segments: TranscriptSegment[] = []) => request<TranscriptRecord>(`/api/meetings/${id}/transcript`, { method: 'PUT', body: JSON.stringify({ content, segments }) }),
   transcribe: (id: number) => request<{ transcript: TranscriptRecord; provider: string; language: string | null }>(`/api/meetings/${id}/transcribe`, { method: 'POST', body: JSON.stringify({}) }),
-  analyze: (id: number) => request<AnalysisRecord>(`/api/meetings/${id}/analyze`, { method: 'POST', body: JSON.stringify({}) }),
+  analyze: (id: number, textRange?: { startChar: number; endChar: number }) => request<AnalysisRecord>(`/api/meetings/${id}/analyze`, { method: 'POST', body: JSON.stringify(textRange ?? {}) }),
+  transcribeFragment: (id: number, file: Blob, filename: string, startSeconds: number, endSeconds: number) => {
+    const form = new FormData();
+    form.append('audio', file, filename);
+    form.append('startSeconds', String(startSeconds));
+    form.append('endSeconds', String(endSeconds));
+    return request<{ transcript: TranscriptRecord; provider: string; language: string | null }>(`/api/meetings/${id}/transcribe-fragment`, { method: 'POST', body: form });
+  },
   analysis: (id: number) => request<AnalysisRecord>(`/api/meetings/${id}/analysis`),
   createMeeting: (input: { title: string; managerName: string; meetingDate: string }) => request<Meeting>('/api/meetings', { method: 'POST', body: JSON.stringify(input) }),
   uploadAudio: (id: number, file: Blob, filename: string, duration: number | null, consentType: 'recording' | 'audio_upload', confirmedAt: string) => {

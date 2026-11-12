@@ -6,10 +6,10 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
-import { attachAudio, createMeeting, db, deleteMeeting, findMeeting, getAnalysis, getDashboardStats, getTranscript, listMeetings, saveAnalysis, setMeetingStatus, upsertTranscript } from './db.js';
+import { attachAudio, clearAnalysis, createMeeting, db, deleteMeeting, findMeeting, getAnalysis, getDashboardStats, getTranscript, listMeetings, saveAnalysis, setMeetingStatus, upsertTranscript } from './db.js';
 import { isAuthenticated, login, logout, requireAuth } from './auth.js';
 import { AIProviderFactory } from './ai/factory.js';
-import { AIProviderRequestError, AIProviderUnavailableError } from './ai/provider.js';
+import { AIProviderLimitError, AIProviderRequestError, AIProviderUnavailableError } from './ai/provider.js';
 import { MeetingAnalysisService, TranscriptionService, type MeetingContext } from './ai/services.js';
 import { AnalysisValidationError, validateRoyalBrickReport } from './ai/validation.js';
 
@@ -28,10 +28,15 @@ const maxAudioSize = Number(process.env.MAX_AUDIO_SIZE_MB ?? 250) * 1024 * 1024;
 const allowedExtensions = new Set(['.mp3', '.wav', '.webm', '.m4a']);
 const allowedMimeTypes = new Set(['audio/mpeg', 'audio/wav', 'audio/x-wav', 'audio/wave', 'audio/webm', 'audio/mp4', 'audio/x-m4a', 'video/mp4', 'application/octet-stream']);
 const consentVersion = '1.0';
-const royalBrickSystemPrompt = fs.readFileSync(path.resolve('server/prompts/royal-brick-system-prompt.txt'), 'utf8');
+const fullRoyalBrickSystemPrompt = fs.readFileSync(path.resolve('server/prompts/royal-brick-system-prompt.txt'), 'utf8');
+const compactRoyalBrickSystemPrompt = fs.readFileSync(path.resolve('server/prompts/royal-brick-compact-system-prompt.txt'), 'utf8');
+const promptMode = process.env.GROQ_PROMPT_MODE ?? (process.env.AI_PROVIDER === 'groq' ? 'compact' : 'full');
+const royalBrickSystemPrompt = promptMode === 'full' ? fullRoyalBrickSystemPrompt : compactRoyalBrickSystemPrompt;
 const aiProvider = AIProviderFactory.create();
 const transcriptionService = new TranscriptionService(aiProvider);
 const meetingAnalysisService = new MeetingAnalysisService(aiProvider);
+const groqTpmLimit = Number(process.env.GROQ_TPM_LIMIT ?? 8_000);
+const estimatedSystemPromptTokens = Math.ceil((royalBrickSystemPrompt.length + 220) / 6.5);
 
 const audioUpload = multer({
   storage: multer.diskStorage({
@@ -88,6 +93,21 @@ app.post('/api/auth/login', (request, response) => {
 app.post('/api/auth/logout', logout);
 
 app.use('/api', requireAuth);
+
+app.get('/api/ai/capacity', (_request, response) => {
+  if (aiProvider.name !== 'groq') {
+    response.json({ provider: aiProvider.name, tpmLimit: null, estimatedSystemTokens: null, estimatedTranscriptTokensAvailable: null, estimatedFragmentSecondsAvailable: null });
+    return;
+  }
+  const availableTranscriptTokens = Math.max(0, groqTpmLimit - estimatedSystemPromptTokens - 300);
+  response.json({
+    provider: aiProvider.name,
+    tpmLimit: groqTpmLimit,
+    estimatedSystemTokens: estimatedSystemPromptTokens,
+    estimatedTranscriptTokensAvailable: availableTranscriptTokens,
+    estimatedFragmentSecondsAvailable: Math.floor(availableTranscriptTokens / 3),
+  });
+});
 app.get('/api/dashboard/stats', (_request, response) => response.json(getDashboardStats()));
 app.get('/api/meetings', (_request, response) => response.json(listMeetings()));
 app.get('/api/meetings/:id', (request, response) => {
@@ -224,6 +244,7 @@ app.put('/api/meetings/:id/transcript', (request, response) => {
     response.status(400).json({ error: 'Расшифровка имеет неверный формат' });
     return;
   }
+  clearAnalysis(meetingId);
   response.json(upsertTranscript(meetingId, parsed.data.content, parsed.data.segments));
 });
 app.post('/api/meetings/:id/transcribe', async (request, response, next) => {
@@ -246,11 +267,52 @@ app.post('/api/meetings/:id/transcribe', async (request, response, next) => {
       durationSeconds: meeting.duration,
     });
     const transcript = upsertTranscript(meetingId, result.content, result.segments);
+    clearAnalysis(meetingId);
     setMeetingStatus(meetingId, 'recorded');
     response.status(201).json({ transcript, provider: result.provider, language: result.language });
   } catch (error) {
     if (!(error instanceof AIProviderUnavailableError)) setMeetingStatus(meetingId, 'error');
     next(error);
+  }
+});
+app.post('/api/meetings/:id/transcribe-fragment', audioUpload.single('audio'), async (request, response, next) => {
+  const meetingId = Number(request.params.id);
+  const meeting = findMeeting(meetingId);
+  if (!meeting) {
+    if (request.file) fs.rmSync(request.file.path, { force: true });
+    response.status(404).json({ error: 'Встреча не найдена' });
+    return;
+  }
+  const parsed = z.object({
+    startSeconds: z.coerce.number().finite().min(0),
+    endSeconds: z.coerce.number().finite().min(0),
+  }).safeParse(request.body);
+  if (!parsed.success || parsed.data.endSeconds <= parsed.data.startSeconds) {
+    if (request.file) fs.rmSync(request.file.path, { force: true });
+    response.status(400).json({ error: 'Укажите корректный интервал аудио: конец должен быть позже начала' });
+    return;
+  }
+  if (!request.file) {
+    response.status(400).json({ error: 'Аудиофрагмент не передан' });
+    return;
+  }
+  try {
+    setMeetingStatus(meetingId, 'transcribing');
+    const result = await transcriptionService.transcribe({
+      filePath: request.file.path,
+      mimeType: request.file.mimetype || 'audio/webm',
+      filename: request.file.originalname || `fragment-${parsed.data.startSeconds}-${parsed.data.endSeconds}.webm`,
+      durationSeconds: parsed.data.endSeconds - parsed.data.startSeconds,
+    });
+    const transcript = upsertTranscript(meetingId, result.content, result.segments, parsed.data.startSeconds, parsed.data.endSeconds);
+    clearAnalysis(meetingId);
+    setMeetingStatus(meetingId, 'recorded');
+    response.status(201).json({ transcript, provider: result.provider, language: result.language });
+  } catch (error) {
+    if (!(error instanceof AIProviderUnavailableError)) setMeetingStatus(meetingId, 'error');
+    next(error);
+  } finally {
+    fs.rmSync(request.file.path, { force: true });
   }
 });
 app.post('/api/meetings/:id/analyze', async (request, response, next) => {
@@ -265,12 +327,38 @@ app.post('/api/meetings/:id/analyze', async (request, response, next) => {
     response.status(400).json({ error: 'Сначала добавьте или получите расшифровку встречи' });
     return;
   }
+  const textRange = z.object({
+    startChar: z.number().int().min(0).optional(),
+    endChar: z.number().int().min(0).optional(),
+  }).strict().safeParse(request.body ?? {});
+  if (!textRange.success) {
+    response.status(400).json({ error: 'Диапазон текста имеет неверный формат' });
+    return;
+  }
+  const hasStart = textRange.data.startChar !== undefined;
+  const hasEnd = textRange.data.endChar !== undefined;
+  if (hasStart !== hasEnd) {
+    response.status(400).json({ error: 'Для анализа текста укажите начало и конец выделения' });
+    return;
+  }
+  const selectedRange = hasStart && hasEnd
+    ? { start: Math.min(textRange.data.startChar as number, textRange.data.endChar as number), end: Math.max(textRange.data.startChar as number, textRange.data.endChar as number) }
+    : null;
+  if (selectedRange && selectedRange.end > transcript.content.length) {
+    response.status(400).json({ error: 'Выделение выходит за пределы расшифровки' });
+    return;
+  }
+  const selectedContent = selectedRange ? transcript.content.slice(selectedRange.start, selectedRange.end).trim() : transcript.content.trim();
+  if (!selectedContent) {
+    response.status(400).json({ error: 'Выделенный текст пустой' });
+    return;
+  }
   const context: MeetingContext = { meetingId, managerName: meeting.managerName, meetingDate: meeting.meetingDate, systemPrompt: royalBrickSystemPrompt };
   try {
     setMeetingStatus(meetingId, 'analyzing');
-    const report = await meetingAnalysisService.analyze({ content: transcript.content, segments: transcript.segments, language: null, provider: 'manual' }, context);
+    const report = await meetingAnalysisService.analyze({ content: selectedContent, segments: selectedRange ? [] : transcript.segments, language: null, provider: 'manual' }, context);
     const scoreSummary = validateRoyalBrickReport(report);
-    const analysis = saveAnalysis(meetingId, scoreSummary.normalizedScore, scoreSummary.coverage, report);
+    const analysis = saveAnalysis(meetingId, scoreSummary.normalizedScore, scoreSummary.coverage, report, transcript.sourceStartSeconds, transcript.sourceEndSeconds);
     setMeetingStatus(meetingId, 'analyzed');
     response.status(201).json(analysis);
   } catch (error) {
@@ -311,7 +399,7 @@ app.use((error: unknown, _request: express.Request, response: express.Response, 
     return;
   }
   if (error instanceof AIProviderRequestError) {
-    response.status(502).json({ error: error.message, code: error.code });
+    response.status(error instanceof AIProviderLimitError ? 413 : 502).json({ error: error.message, code: error.code });
     return;
   }
   if (error instanceof AnalysisValidationError) {

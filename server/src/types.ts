@@ -31,6 +31,8 @@ export interface TranscriptRecord {
   meetingId: number;
   content: string;
   segments: TranscriptSegment[];
+  sourceStartSeconds: number | null;
+  sourceEndSeconds: number | null;
   updatedAt: string | null;
 }
 
@@ -40,5 +42,7 @@ export interface AnalysisRecord {
   score: number | null;
   coverage: number | null;
   result: unknown;
+  sourceStartSeconds: number | null;
+  sourceEndSeconds: number | null;
   createdAt: string;
 }
